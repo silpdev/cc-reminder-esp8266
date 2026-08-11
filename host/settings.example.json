@@ -1,0 +1,13 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/cc-reminder-esp8266/host/cc_reminder_http.py WORKING", "timeout": 10 }] }
+    ],
+    "PermissionRequest": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/cc-reminder-esp8266/host/cc_reminder_http.py INTERACT", "timeout": 10 }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "python3 ~/cc-reminder-esp8266/host/cc_reminder_http.py IDLE", "timeout": 10 }] }
+    ]
+  }
+}

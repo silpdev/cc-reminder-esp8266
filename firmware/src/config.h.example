@@ -1,0 +1,24 @@
+#pragma once
+
+// Copy file nay thanh config.h roi dien thong tin cua ban.
+// config.h da nam trong .gitignore nen khong bi commit len GitHub.
+
+#define WIFI_SSID   "TEN_WIFI_CUA_BAN"
+#define WIFI_PASS   "MAT_KHAU_WIFI"
+#define HOSTNAME    "cc-reminder"      // truy cap qua cc-reminder.local
+
+#define PIXEL_COUNT 1                  // so LED WS2812
+#define BRIGHT      60                 // 0-255. 60 la vua cho den bao tren ban
+
+// Mau tung trang thai (truoc khi nhan he so BRIGHT)
+#define COL_IDLE_R       0
+#define COL_IDLE_G     255
+#define COL_IDLE_B       0
+
+#define COL_WORKING_R  255
+#define COL_WORKING_G   90
+#define COL_WORKING_B    0
+
+#define COL_INTERACT_R 255
+#define COL_INTERACT_G   0
+#define COL_INTERACT_B   0

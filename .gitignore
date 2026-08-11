@@ -1,0 +1,23 @@
+# WiFi credentials - KHONG commit
+firmware/src/config.h
+test/src/config.h
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+!.vscode/extensions.json
+
+# OpenSCAD
+*.scad.bak
+*.csg
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
