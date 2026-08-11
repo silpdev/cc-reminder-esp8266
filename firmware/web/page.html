@@ -90,16 +90,15 @@ button.dgr{color:#ff8080}
 <div class="card">
   <h2>WiFi</h2>
   <div class="row">
-    <label for="ssid">SSID</label>
+    <label>Nhớ tối đa 3 mạng — nhà, công ty, hotspot</label>
     <button onclick="scan()" id="btn-scan">Quét</button>
   </div>
-  <div class="row"><input type="text" id="ssid" list="nets" autocomplete="off">
-    <datalist id="nets"></datalist></div>
-  <div class="row"><label for="pass">Mật khẩu</label></div>
-  <div class="row"><input type="password" id="pass" placeholder="để trống = giữ nguyên"></div>
+  <datalist id="nets"></datalist>
+  <div id="wifis"></div>
   <div class="row"><label for="host">Hostname</label></div>
   <div class="row"><input type="text" id="host" autocomplete="off"></div>
-  <div class="hint">Đổi WiFi, hostname hoặc số LED thì thiết bị cần khởi động lại.</div>
+  <div class="hint">Bật nguồn ở đâu, thiết bị tự quét và chọn mạng có tín hiệu
+  mạnh nhất trong danh sách. Xoá trống ô SSID để bỏ mạng đó.</div>
 </div>
 
 <div class="card">
@@ -124,6 +123,20 @@ function toast(t) {
   setTimeout(function () { m.classList.remove('on'); }, 2200);
 }
 
+function buildWifis() {
+  var h = '';
+  for (var i = 0; i < 3; i++) {
+    h += '<div class="row"><label for="ssid' + i + '" style="flex:0 0 58px">#' +
+         (i + 1) + '</label>' +
+         '<input type="text" id="ssid' + i + '" list="nets" autocomplete="off" ' +
+         'placeholder="SSID"></div>' +
+         '<div class="row"><label style="flex:0 0 58px"></label>' +
+         '<input type="password" id="pass' + i + '" ' +
+         'placeholder="mật khẩu"></div>';
+  }
+  el('wifis').innerHTML = h;
+}
+
 function buildStates() {
   var h = '';
   for (var i = 0; i < 3; i++) {
@@ -140,7 +153,11 @@ function buildStates() {
 
 function loadConfig() {
   fetch('/api/config').then(function (r) { return r.json(); }).then(function (c) {
-    el('ssid').value   = c.ssid;
+    for (var k = 0; k < 3; k++) {
+      el('ssid' + k).value = c.nets[k].ssid;
+      el('pass' + k).placeholder = c.nets[k].saved ? 'đã lưu — để trống là giữ nguyên'
+                                                   : 'mật khẩu';
+    }
     el('host').value   = c.host;
     el('pixels').value = c.pixels;
     el('bright').value = c.bright;
@@ -159,7 +176,8 @@ function loadStatus() {
     var col = { IDLE: '#22c55e', WORKING: '#f59e0b', INTERACT: '#ef4444' };
     el('s-state').innerHTML =
       '<span class="dot" style="background:' + (col[s.state] || '#888') + '"></span>' + s.state;
-    el('s-wifi').textContent = s.ap ? 'Chế độ AP (chưa cấu hình)' : (s.ssid || '—');
+    el('s-wifi').textContent = s.ap ? 'Chế độ AP (chưa cấu hình)'
+      : ((s.ssid || '—') + (s.slot >= 0 ? '  (#' + (s.slot + 1) + ')' : ''));
     el('s-ip').textContent   = s.ip;
     el('s-rssi').textContent = s.ap ? '—' : (s.rssi + ' dBm');
     var u = s.uptime, d = Math.floor(u / 86400), h = Math.floor(u % 86400 / 3600),
@@ -196,8 +214,10 @@ function scan() {
 
 function save(thenReboot) {
   var d = new URLSearchParams();
-  d.append('ssid',   el('ssid').value);
-  d.append('pass',   el('pass').value);
+  for (var k = 0; k < 3; k++) {
+    d.append('ssid' + k, el('ssid' + k).value);
+    d.append('pass' + k, el('pass' + k).value);
+  }
   d.append('host',   el('host').value);
   d.append('pixels', el('pixels').value);
   d.append('bright', el('bright').value);
@@ -212,7 +232,7 @@ function save(thenReboot) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: d.toString()
   }).then(function (r) { return r.json(); }).then(function (res) {
-    el('pass').value = '';
+    for (var k = 0; k < 3; k++) el('pass' + k).value = '';
     if (thenReboot || res.reboot) {
       toast('Đã lưu — đang khởi động lại…');
       fetch('/api/reboot', { method: 'POST' });
@@ -229,6 +249,7 @@ function factoryReset() {
   });
 }
 
+buildWifis();
 buildStates();
 loadConfig();
 loadStatus();

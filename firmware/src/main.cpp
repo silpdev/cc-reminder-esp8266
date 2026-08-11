@@ -1,80 +1,88 @@
 /*
  * cc-reminder - ESP8266 (Wemos D1 Mini) + WS2812
- * Ban co TRANG WEB CAU HINH: WiFi + LED, luu vao EEPROM.
+ * Ban ROAMING: nho 3 mang WiFi, tu chon mang manh nhat, va tra loi
+ * UDP discovery de host tim duoc IP o bat ky mang nao.
  *
- * Lan dau bat nguon (hoac khi khong noi duoc WiFi cu):
- *   -> tu tao AP ten "cc-reminder-setup" (mo, khong mat khau)
- *   -> ket noi vao roi mo http://192.168.4.1
- *      (dien thoai thuong tu bung trang len nho captive portal)
- *   -> dien WiFi, Luu & khoi dong lai
- *
- * Sau khi vao duoc WiFi nha: http://cc-reminder.local  (hoac IP)
+ * Cam o nha hay o cong ty deu chay, khong phai cau hinh lai.
  *
  * DAU NOI
  *   strip VCC -> 3V3
  *   strip DIN -> D9 / RX (GPIO3 - bat buoc, DMA chi chay chan nay)
  *   strip GND -> G
  *
- * API (giu nguyen de host/cc_reminder_http.py khong phai sua)
- *   GET /state?s=IDLE|WORKING|INTERACT
- *   GET /status
+ * API
+ *   GET  /                    trang cau hinh
+ *   GET  /state?s=IDLE|WORKING|INTERACT
+ *   GET  /status              ten trang thai, dang text
+ *   GET  /api/status          JSON
+ *   GET  /api/config          JSON cau hinh (khong co mat khau)
+ *   POST /api/config          luu cau hinh
+ *   GET  /api/scan            quet WiFi
+ *   POST /api/reboot | /api/reset
  *
- * File nay la .cpp cho PlatformIO. Dung Arduino IDE thi doi ten
- * thanh main.ino va bo dong #include <Arduino.h>.
+ * UDP DISCOVERY
+ *   Host broadcast "CCR?" toi port 45678 -> thiet bi tra ve JSON co IP.
+ *   Nho vay host khong phu thuoc mDNS (mDNS hay chet tren WSL).
+ *
+ * Sua HTML o firmware/web/page.html roi chay tools/embed_page.py.
  */
 
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
 #include <DNSServer.h>
 #include <EEPROM.h>
 #include <NeoPixelBus.h>
 
 /* ===================== hang so ===================== */
-#define MAX_PIXELS   24
-#define CFG_MAGIC    0x43524D33UL      // doi so nay = xoa cau hinh cu
-#define AP_SSID      "cc-reminder-setup"
-#define EEPROM_SIZE  512
+#define MAX_PIXELS    24
+#define NET_SLOTS     3
+#define CFG_MAGIC     0x43524D34UL     // doi so = xoa cau hinh cu
+#define AP_SSID       "cc-reminder-setup"
+#define EEPROM_SIZE   512
+#define DISCO_PORT    45678
+#define DISCO_PROBE   "CCR?"
+#define RECONNECT_MS  20000UL          // mat wifi bao lau thi quet lai
 
 const uint8_t ST_IDLE     = 0;
 const uint8_t ST_WORKING   = 1;
 const uint8_t ST_INTERACT  = 2;
 
 /* ===================== cau hinh ===================== */
+struct Net {
+  char ssid[33];
+  char pass[65];
+};
+
 struct Config {
   uint32_t magic;
-  char     ssid[33];
-  char     pass[65];
+  Net      net[NET_SLOTS];
   char     host[24];
   uint8_t  pixels;
   uint8_t  bright;
-  uint8_t  order;          // 0 = GRB (mac dinh), 1 = RGB
-  uint8_t  col[3][3];      // [state][r,g,b]
-  uint8_t  pulse[3];       // 0 = sang dung, 1 = dap nhip
-  uint16_t period[3];      // chu ky nhip dap, ms
+  uint8_t  order;              // 0 = GRB (mac dinh), 1 = RGB
+  uint8_t  col[3][3];
+  uint8_t  pulse[3];
+  uint16_t period[3];
 };
 
 Config cfg;
 
 void setDefaults() {
   memset(&cfg, 0, sizeof(cfg));
-  cfg.magic  = CFG_MAGIC;
-  cfg.ssid[0] = '\0';
-  cfg.pass[0] = '\0';
+  cfg.magic = CFG_MAGIC;
   strncpy(cfg.host, "cc-reminder", sizeof(cfg.host) - 1);
   cfg.pixels = 1;
   cfg.bright = 60;
   cfg.order  = 0;
 
-  // IDLE - xanh la, sang dung
-  cfg.col[0][0] = 0;   cfg.col[0][1] = 255; cfg.col[0][2] = 0;
+  cfg.col[0][0] = 0;   cfg.col[0][1] = 255; cfg.col[0][2] = 0;   // IDLE
   cfg.pulse[0]  = 0;   cfg.period[0] = 2000;
-  // WORKING - vang cam, dap cham
-  cfg.col[1][0] = 255; cfg.col[1][1] = 90;  cfg.col[1][2] = 0;
+  cfg.col[1][0] = 255; cfg.col[1][1] = 90;  cfg.col[1][2] = 0;   // WORKING
   cfg.pulse[1]  = 1;   cfg.period[1] = 2400;
-  // INTERACT - do, dap nhanh
-  cfg.col[2][0] = 255; cfg.col[2][1] = 0;   cfg.col[2][2] = 0;
+  cfg.col[2][0] = 255; cfg.col[2][1] = 0;   cfg.col[2][2] = 0;   // INTERACT
   cfg.pulse[2]  = 1;   cfg.period[2] = 900;
 }
 
@@ -86,17 +94,18 @@ void loadConfig() {
     setDefaults();
     return;
   }
-  // chan gia tri sai lam treo thiet bi
   if (cfg.pixels < 1 || cfg.pixels > MAX_PIXELS) cfg.pixels = 1;
   if (cfg.bright < 1) cfg.bright = 1;
-  if (cfg.order > 1) cfg.order = 0;
+  if (cfg.order > 1)  cfg.order = 0;
   for (uint8_t i = 0; i < 3; i++) {
     if (cfg.period[i] < 200)   cfg.period[i] = 900;
     if (cfg.period[i] > 10000) cfg.period[i] = 10000;
     if (cfg.pulse[i] > 1)      cfg.pulse[i] = 0;
   }
-  cfg.ssid[sizeof(cfg.ssid) - 1] = '\0';
-  cfg.pass[sizeof(cfg.pass) - 1] = '\0';
+  for (uint8_t i = 0; i < NET_SLOTS; i++) {
+    cfg.net[i].ssid[sizeof(cfg.net[i].ssid) - 1] = '\0';
+    cfg.net[i].pass[sizeof(cfg.net[i].pass) - 1] = '\0';
+  }
   cfg.host[sizeof(cfg.host) - 1] = '\0';
   if (cfg.host[0] == '\0') strncpy(cfg.host, "cc-reminder", sizeof(cfg.host) - 1);
 }
@@ -108,14 +117,19 @@ void saveConfig() {
   Serial.println("eeprom da luu");
 }
 
+uint8_t netCount() {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < NET_SLOTS; i++) if (cfg.net[i].ssid[0]) n++;
+  return n;
+}
+
 /* ===================== LED ===================== */
-// Cap phat co dinh MAX_PIXELS, chi dieu khien cfg.pixels con dau.
 NeoPixelBus<NeoGrbFeature, NeoEsp8266Dma800KbpsMethod> strip(MAX_PIXELS);
 
 uint8_t state = ST_IDLE;
 
 void writeAll(uint8_t r, uint8_t g, uint8_t b) {
-  // cfg.order == 1 (strip RGB): dao r/g vi feature dang la GRB
+  // order == 1 (strip RGB): dao r/g vi feature dang la GRB
   RgbColor c = (cfg.order == 1) ? RgbColor(g, r, b) : RgbColor(r, g, b);
   for (uint16_t i = 0; i < MAX_PIXELS; i++) {
     strip.SetPixelColor(i, (i < cfg.pixels) ? c : RgbColor(0, 0, 0));
@@ -123,7 +137,6 @@ void writeAll(uint8_t r, uint8_t g, uint8_t b) {
   strip.Show();
 }
 
-// he so 0..1 theo nhip dap
 float pulseK(uint16_t periodMs, float floorK) {
   if (periodMs < 1) periodMs = 1;
   float deg = (float)(millis() % periodMs) / (float)periodMs * 360.0f;
@@ -133,7 +146,7 @@ float pulseK(uint16_t periodMs, float floorK) {
 
 void renderLed() {
   static unsigned long last = 0;
-  if (millis() - last < 20) return;        // ~50Hz
+  if (millis() - last < 20) return;
   last = millis();
 
   uint8_t s = state;
@@ -146,10 +159,12 @@ void renderLed() {
            (uint8_t)(cfg.col[s][2] * bk));
 }
 
-/* ===================== web ===================== */
+/* ===================== web / udp ===================== */
 ESP8266WebServer server(80);
-DNSServer dns;
+DNSServer  dns;
+WiFiUDP    disco;
 bool apMode = false;
+int  activeSlot = -1;
 
 extern const char PAGE_HTML[] PROGMEM;
 
@@ -159,13 +174,19 @@ const char* stateName(uint8_t s) {
   return "IDLE";
 }
 
+String jstr(const String& in) {
+  String o = in;
+  o.replace("\\", "\\\\");
+  o.replace("\"", "\\\"");
+  return o;
+}
+
 String hex3(const uint8_t* c) {
   char b[10];
   snprintf(b, sizeof(b), "#%02x%02x%02x", c[0], c[1], c[2]);
   return String(b);
 }
 
-// "#rrggbb" -> 3 byte. Tra ve false neu chuoi khong dung dang.
 bool parseHex3(const String& s, uint8_t* out) {
   if (s.length() < 7 || s.charAt(0) != '#') return false;
   for (uint8_t i = 0; i < 3; i++) {
@@ -174,63 +195,103 @@ bool parseHex3(const String& s, uint8_t* out) {
   return true;
 }
 
+/* ---- UDP discovery ---- */
+void discoBegin() {
+  disco.begin(DISCO_PORT);
+  Serial.printf("udp discovery: port %d\n", DISCO_PORT);
+}
+
+void discoLoop() {
+  int sz = disco.parsePacket();
+  if (sz <= 0) return;
+
+  char buf[32];
+  int n = disco.read(buf, sizeof(buf) - 1);
+  if (n < 0) n = 0;
+  buf[n] = '\0';
+
+  if (strncmp(buf, DISCO_PROBE, strlen(DISCO_PROBE)) != 0) return;
+
+  String o = "{\"cc-reminder\":1,\"host\":\"";
+  o += jstr(String(cfg.host));
+  o += "\",\"ip\":\"";   o += WiFi.localIP().toString();
+  o += "\",\"port\":80,\"state\":\""; o += stateName(state);
+  o += "\"}";
+
+  disco.beginPacket(disco.remoteIP(), disco.remotePort());
+  disco.write((const uint8_t*)o.c_str(), o.length());
+  disco.endPacket();
+}
+
+/* ---- handlers ---- */
 void handleRoot() {
   server.send_P(200, "text/html", PAGE_HTML);
 }
 
 void handleApiStatus() {
   String o = "{";
-  o += "\"state\":\"";  o += stateName(state);      o += "\",";
+  o += "\"state\":\"";  o += stateName(state); o += "\",";
   o += "\"ap\":";       o += (apMode ? "true" : "false"); o += ",";
-  o += "\"ssid\":\"";   o += WiFi.SSID();           o += "\",";
+  o += "\"slot\":";     o += activeSlot;       o += ",";
+  o += "\"ssid\":\"";   o += jstr(WiFi.SSID()); o += "\",";
   o += "\"ip\":\"";     o += (apMode ? WiFi.softAPIP().toString()
-                                    : WiFi.localIP().toString()); o += "\",";
-  o += "\"host\":\"";   o += cfg.host;              o += "\",";
-  o += "\"rssi\":";     o += WiFi.RSSI();           o += ",";
-  o += "\"uptime\":";   o += (millis() / 1000);     o += ",";
+                                     : WiFi.localIP().toString()); o += "\",";
+  o += "\"host\":\"";   o += jstr(String(cfg.host)); o += "\",";
+  o += "\"rssi\":";     o += WiFi.RSSI();      o += ",";
+  o += "\"uptime\":";   o += (millis() / 1000); o += ",";
   o += "\"heap\":";     o += ESP.getFreeHeap();
   o += "}";
   server.send(200, "application/json", o);
 }
 
 void handleApiConfigGet() {
-  String o = "{";
-  o += "\"ssid\":\"";  o += cfg.ssid;   o += "\",";
-  o += "\"host\":\"";  o += cfg.host;   o += "\",";
+  String o = "{\"nets\":[";
+  for (uint8_t i = 0; i < NET_SLOTS; i++) {
+    if (i) o += ",";
+    o += "{\"ssid\":\""; o += jstr(String(cfg.net[i].ssid));
+    o += "\",\"saved\":"; o += (cfg.net[i].pass[0] ? "true" : "false");
+    o += "}";
+  }
+  o += "],";
+  o += "\"host\":\"";  o += jstr(String(cfg.host)); o += "\",";
   o += "\"pixels\":";  o += cfg.pixels; o += ",";
   o += "\"bright\":";  o += cfg.bright; o += ",";
   o += "\"order\":";   o += cfg.order;  o += ",";
   o += "\"col\":[";
-  for (uint8_t i = 0; i < 3; i++) {
-    o += "\""; o += hex3(cfg.col[i]); o += "\"";
-    if (i < 2) o += ",";
-  }
+  for (uint8_t i = 0; i < 3; i++) { o += "\""; o += hex3(cfg.col[i]); o += "\"";
+                                    if (i < 2) o += ","; }
   o += "],\"pulse\":[";
   for (uint8_t i = 0; i < 3; i++) { o += cfg.pulse[i];  if (i < 2) o += ","; }
   o += "],\"period\":[";
   for (uint8_t i = 0; i < 3; i++) { o += cfg.period[i]; if (i < 2) o += ","; }
   o += "]}";
-  // mat khau WiFi khong bao gio gui ve trinh duyet
   server.send(200, "application/json", o);
 }
 
 void handleApiConfigPost() {
   bool needReboot = false;
+  char key[8];
 
-  if (server.hasArg("ssid")) {
-    String v = server.arg("ssid");
-    if (v != String(cfg.ssid)) {
-      strncpy(cfg.ssid, v.c_str(), sizeof(cfg.ssid) - 1);
-      cfg.ssid[sizeof(cfg.ssid) - 1] = '\0';
+  for (uint8_t i = 0; i < NET_SLOTS; i++) {
+    snprintf(key, sizeof(key), "ssid%u", i);
+    if (server.hasArg(key)) {
+      String v = server.arg(key);
+      if (v != String(cfg.net[i].ssid)) {
+        strncpy(cfg.net[i].ssid, v.c_str(), sizeof(cfg.net[i].ssid) - 1);
+        cfg.net[i].ssid[sizeof(cfg.net[i].ssid) - 1] = '\0';
+        if (v.length() == 0) cfg.net[i].pass[0] = '\0';   // xoa slot
+        needReboot = true;
+      }
+    }
+    // o trong = giu mat khau cu
+    snprintf(key, sizeof(key), "pass%u", i);
+    if (server.hasArg(key) && server.arg(key).length() > 0) {
+      strncpy(cfg.net[i].pass, server.arg(key).c_str(), sizeof(cfg.net[i].pass) - 1);
+      cfg.net[i].pass[sizeof(cfg.net[i].pass) - 1] = '\0';
       needReboot = true;
     }
   }
-  // chi ghi mat khau khi nguoi dung go moi (o trong = giu nguyen)
-  if (server.hasArg("pass") && server.arg("pass").length() > 0) {
-    strncpy(cfg.pass, server.arg("pass").c_str(), sizeof(cfg.pass) - 1);
-    cfg.pass[sizeof(cfg.pass) - 1] = '\0';
-    needReboot = true;
-  }
+
   if (server.hasArg("host")) {
     String v = server.arg("host");
     if (v.length() > 0 && v != String(cfg.host)) {
@@ -248,19 +309,19 @@ void handleApiConfigPost() {
   if (server.hasArg("order"))
     cfg.order = (server.arg("order").toInt() == 1) ? 1 : 0;
 
-  const char* ck[3] = { "c0", "c1", "c2" };
-  const char* pk[3] = { "p0", "p1", "p2" };
-  const char* tk[3] = { "t0", "t1", "t2" };
   for (uint8_t i = 0; i < 3; i++) {
-    if (server.hasArg(ck[i])) {
+    snprintf(key, sizeof(key), "c%u", i);
+    if (server.hasArg(key)) {
       uint8_t rgb[3];
-      if (parseHex3(server.arg(ck[i]), rgb)) {
+      if (parseHex3(server.arg(key), rgb)) {
         cfg.col[i][0] = rgb[0]; cfg.col[i][1] = rgb[1]; cfg.col[i][2] = rgb[2];
       }
     }
-    if (server.hasArg(pk[i])) cfg.pulse[i] = (server.arg(pk[i]).toInt() == 1) ? 1 : 0;
-    if (server.hasArg(tk[i]))
-      cfg.period[i] = (uint16_t)constrain(server.arg(tk[i]).toInt(), 200, 10000);
+    snprintf(key, sizeof(key), "p%u", i);
+    if (server.hasArg(key)) cfg.pulse[i] = (server.arg(key).toInt() == 1) ? 1 : 0;
+    snprintf(key, sizeof(key), "t%u", i);
+    if (server.hasArg(key))
+      cfg.period[i] = (uint16_t)constrain(server.arg(key).toInt(), 200, 10000);
   }
 
   saveConfig();
@@ -275,10 +336,7 @@ void handleApiScan() {
   String o = "[";
   for (int i = 0; i < n && i < 20; i++) {
     if (i) o += ",";
-    String ss = WiFi.SSID(i);
-    ss.replace("\\", "\\\\");
-    ss.replace("\"", "\\\"");
-    o += "{\"ssid\":\""; o += ss;
+    o += "{\"ssid\":\""; o += jstr(WiFi.SSID(i));
     o += "\",\"rssi\":";  o += WiFi.RSSI(i);
     o += "}";
   }
@@ -293,7 +351,6 @@ void handleSetState() {
   else if (s == "WORKING")  state = ST_WORKING;
   else if (s == "INTERACT") state = ST_INTERACT;
   else { server.send(400, "text/plain", "BAD_STATE\n"); return; }
-  Serial.printf("-> %s\n", stateName(state));
   server.send(200, "text/plain", String("OK ") + stateName(state) + "\n");
 }
 
@@ -316,9 +373,9 @@ void handleFactoryReset() {
 }
 
 void handleNotFound() {
-  // O che do AP: dieu huong moi thu ve trang cau hinh (captive portal)
   if (apMode) {
-    server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/", true);
+    server.sendHeader("Location",
+                      String("http://") + WiFi.softAPIP().toString() + "/", true);
     server.send(302, "text/plain", "");
     return;
   }
@@ -326,56 +383,109 @@ void handleNotFound() {
 }
 
 void setupRoutes() {
-  server.on("/",              HTTP_GET,  handleRoot);
-  server.on("/api/status",    HTTP_GET,  handleApiStatus);
-  server.on("/api/config",    HTTP_GET,  handleApiConfigGet);
-  server.on("/api/config",    HTTP_POST, handleApiConfigPost);
-  server.on("/api/scan",      HTTP_GET,  handleApiScan);
-  server.on("/api/reboot",    HTTP_POST, handleReboot);
-  server.on("/api/reset",     HTTP_POST, handleFactoryReset);
-  // giu API cu cho host script
-  server.on("/state",         HTTP_GET,  handleSetState);
-  server.on("/status",        HTTP_GET,  handleStatusText);
+  server.on("/",           HTTP_GET,  handleRoot);
+  server.on("/api/status", HTTP_GET,  handleApiStatus);
+  server.on("/api/config", HTTP_GET,  handleApiConfigGet);
+  server.on("/api/config", HTTP_POST, handleApiConfigPost);
+  server.on("/api/scan",   HTTP_GET,  handleApiScan);
+  server.on("/api/reboot", HTTP_POST, handleReboot);
+  server.on("/api/reset",  HTTP_POST, handleFactoryReset);
+  server.on("/state",      HTTP_GET,  handleSetState);
+  server.on("/status",     HTTP_GET,  handleStatusText);
   server.onNotFound(handleNotFound);
 }
 
-/* ===================== WiFi ===================== */
+/* ===================== WiFi roaming ===================== */
 void startAP() {
   apMode = true;
+  activeSlot = -1;
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID);
   dns.setErrorReplyCode(DNSReplyCode::NoError);
   dns.start(53, "*", WiFi.softAPIP());
-  Serial.printf("AP: %s -> http://%s/\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+  Serial.printf("AP: %s -> http://%s/\n",
+                AP_SSID, WiFi.softAPIP().toString().c_str());
 }
 
-bool connectSTA() {
+// Thu 1 slot. Tra ve true neu noi duoc.
+bool tryConnect(uint8_t slot, uint16_t timeoutMs) {
+  if (!cfg.net[slot].ssid[0]) return false;
+  Serial.printf("thu slot %u \"%s\"", slot, cfg.net[slot].ssid);
+
+  WiFi.begin(cfg.net[slot].ssid, cfg.net[slot].pass);
+  unsigned long t0 = millis();
+  while (millis() - t0 < timeoutMs) {
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf(" OK %s\n", WiFi.localIP().toString().c_str());
+      activeSlot = slot;
+      return true;
+    }
+    // nhay xanh duong trong luc cho
+    writeAll(0, 0, ((millis() / 250) % 2) ? 30 : 0);
+    delay(60);
+  }
+  Serial.println(" that bai");
+  WiFi.disconnect();
+  return false;
+}
+
+/* Quet xem mang nao dang co mat, uu tien mang manh nhat.
+   Nho vay mang qua cong ty khong phai cau hinh lai.          */
+bool connectBest() {
   apMode = false;
   WiFi.mode(WIFI_STA);
   WiFi.hostname(cfg.host);
-  WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
-  WiFi.begin(cfg.ssid, cfg.pass);
+  WiFi.setAutoReconnect(true);
 
-  Serial.printf("noi wifi \"%s\"", cfg.ssid);
-  for (uint8_t i = 0; i < 60 && WiFi.status() != WL_CONNECTED; i++) {
-    // nhay xanh duong trong luc cho
-    writeAll(0, 0, (i % 2) ? 30 : 0);
-    delay(250);
-    Serial.print(".");
+  if (netCount() == 0) return false;
+
+  int8_t order[NET_SLOTS];
+  int32_t rssi[NET_SLOTS];
+  uint8_t cnt = 0;
+
+  int found = WiFi.scanNetworks();
+  for (uint8_t s = 0; s < NET_SLOTS; s++) {
+    if (!cfg.net[s].ssid[0]) continue;
+    int32_t best = -32768;
+    for (int i = 0; i < found; i++) {
+      if (WiFi.SSID(i) == cfg.net[s].ssid && WiFi.RSSI(i) > best) best = WiFi.RSSI(i);
+    }
+    if (best > -32768) { order[cnt] = s; rssi[cnt] = best; cnt++; }
   }
-  Serial.println();
 
+  // sap xep giam dan theo RSSI (n <= 3, insertion sort la du)
+  for (uint8_t i = 1; i < cnt; i++) {
+    int8_t  ks = order[i];
+    int32_t kr = rssi[i];
+    int8_t  j  = i - 1;
+    while (j >= 0 && rssi[j] < kr) {
+      order[j + 1] = order[j]; rssi[j + 1] = rssi[j]; j--;
+    }
+    order[j + 1] = ks; rssi[j + 1] = kr;
+  }
+
+  for (uint8_t i = 0; i < cnt; i++) {
+    Serial.printf("thay \"%s\" (%d dBm)\n", cfg.net[order[i]].ssid, (int)rssi[i]);
+    if (tryConnect(order[i], 12000)) break;
+  }
+
+  // khong thay mang nao da luu -> thu het cac slot (SSID an)
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("that bai");
-    return false;
+    for (uint8_t s = 0; s < NET_SLOTS; s++) {
+      bool tried = false;
+      for (uint8_t i = 0; i < cnt; i++) if (order[i] == (int8_t)s) tried = true;
+      if (!tried && tryConnect(s, 8000)) break;
+    }
   }
-  Serial.print("ip: ");
-  Serial.println(WiFi.localIP());
+
+  if (WiFi.status() != WL_CONNECTED) return false;
+
   if (MDNS.begin(cfg.host)) {
     MDNS.addService("http", "tcp", 80);
     Serial.printf("mdns: http://%s.local/\n", cfg.host);
   }
+  discoBegin();
   return true;
 }
 
@@ -383,45 +493,59 @@ bool connectSTA() {
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("\n=== cc-reminder (web config) ===");
+  Serial.println("\n=== cc-reminder (roaming) ===");
 
   loadConfig();
-
   strip.Begin();
   strip.Show();
-  writeAll(0, 0, 30);          // xanh duong mo = dang khoi dong
+  writeAll(0, 0, 30);
 
-  bool ok = false;
-  if (strlen(cfg.ssid) > 0) ok = connectSTA();
-  if (!ok) startAP();
+  if (!connectBest()) startAP();
 
   setupRoutes();
   server.begin();
   state = ST_IDLE;
-  Serial.println("web server san sang");
+  Serial.println("san sang");
 }
 
 void loop() {
+  server.handleClient();
+
   if (apMode) {
     dns.processNextRequest();
-    // o che do AP: dap xanh duong de biet dang cho cau hinh
     static unsigned long t = 0;
     if (millis() - t > 20) {
       t = millis();
-      float k = pulseK(1600, 0.10f);
-      writeAll(0, 0, (uint8_t)(60 * k));
+      writeAll(0, 0, (uint8_t)(60 * pulseK(1600, 0.10f)));
+    }
+    return;
+  }
+
+  MDNS.update();
+  discoLoop();
+  renderLed();
+
+  /* Mat WiFi qua lau -> quet lai tu dau. Day la co che cho phep
+     rut o nha cam o cong ty ma khong phai lam gi.               */
+  static unsigned long lostAt = 0;
+  if (WiFi.status() != WL_CONNECTED) {
+    if (lostAt == 0) {
+      lostAt = millis();
+      Serial.println("mat wifi");
+    } else if (millis() - lostAt > RECONNECT_MS) {
+      Serial.println("quet lai cac mang da luu");
+      lostAt = 0;
+      if (!connectBest()) startAP();
     }
   } else {
-    MDNS.update();
-    renderLed();
+    lostAt = 0;
   }
-  server.handleClient();
 }
 
 /* ===================== trang web =====================
    Phan duoi day do tools/embed_page.py sinh ra tu firmware/web/page.html.
-   SUA HTML O FILE DO, roi chay: python3 tools/embed_page.py
-   Dung sua truc tiep trong day.                                         */
+   SUA HTML O FILE DO roi chay: python3 tools/embed_page.py
+   Dung sua truc tiep trong day - se bi ghi de.                          */
 /* ---8<--- PAGE BEGIN --- */
 const char PAGE_HTML[] PROGMEM = R"CCR(
 <!doctype html>
@@ -511,16 +635,15 @@ transition:transform .2s}
 <div class="card">
 <h2>WiFi</h2>
 <div class="row">
-<label for="ssid">SSID</label>
+<label>Nhớ tối đa 3 mạng — nhà, công ty, hotspot</label>
 <button onclick="scan()" id="btn-scan">Quét</button>
 </div>
-<div class="row"><input type="text" id="ssid" list="nets" autocomplete="off">
-<datalist id="nets"></datalist></div>
-<div class="row"><label for="pass">Mật khẩu</label></div>
-<div class="row"><input type="password" id="pass" placeholder="để trống = giữ nguyên"></div>
+<datalist id="nets"></datalist>
+<div id="wifis"></div>
 <div class="row"><label for="host">Hostname</label></div>
 <div class="row"><input type="text" id="host" autocomplete="off"></div>
-<div class="hint">Đổi WiFi, hostname hoặc số LED thì thiết bị cần khởi động lại.</div>
+<div class="hint">Bật nguồn ở đâu, thiết bị tự quét và chọn mạng có tín hiệu
+mạnh nhất trong danh sách. Xoá trống ô SSID để bỏ mạng đó.</div>
 </div>
 <div class="card">
 <div class="btns">
@@ -539,6 +662,19 @@ m.textContent = t;
 m.classList.add('on');
 setTimeout(function () { m.classList.remove('on'); }, 2200);
 }
+function buildWifis() {
+var h = '';
+for (var i = 0; i < 3; i++) {
+h += '<div class="row"><label for="ssid' + i + '" style="flex:0 0 58px">#' +
+(i + 1) + '</label>' +
+'<input type="text" id="ssid' + i + '" list="nets" autocomplete="off" ' +
+'placeholder="SSID"></div>' +
+'<div class="row"><label style="flex:0 0 58px"></label>' +
+'<input type="password" id="pass' + i + '" ' +
+'placeholder="mật khẩu"></div>';
+}
+el('wifis').innerHTML = h;
+}
 function buildStates() {
 var h = '';
 for (var i = 0; i < 3; i++) {
@@ -554,7 +690,11 @@ el('states').innerHTML = h;
 }
 function loadConfig() {
 fetch('/api/config').then(function (r) { return r.json(); }).then(function (c) {
-el('ssid').value   = c.ssid;
+for (var k = 0; k < 3; k++) {
+el('ssid' + k).value = c.nets[k].ssid;
+el('pass' + k).placeholder = c.nets[k].saved ? 'đã lưu — để trống là giữ nguyên'
+: 'mật khẩu';
+}
 el('host').value   = c.host;
 el('pixels').value = c.pixels;
 el('bright').value = c.bright;
@@ -572,7 +712,8 @@ fetch('/api/status').then(function (r) { return r.json(); }).then(function (s) {
 var col = { IDLE: '#22c55e', WORKING: '#f59e0b', INTERACT: '#ef4444' };
 el('s-state').innerHTML =
 '<span class="dot" style="background:' + (col[s.state] || '#888') + '"></span>' + s.state;
-el('s-wifi').textContent = s.ap ? 'Chế độ AP (chưa cấu hình)' : (s.ssid || '—');
+el('s-wifi').textContent = s.ap ? 'Chế độ AP (chưa cấu hình)'
+: ((s.ssid || '—') + (s.slot >= 0 ? '  (#' + (s.slot + 1) + ')' : ''));
 el('s-ip').textContent   = s.ip;
 el('s-rssi').textContent = s.ap ? '—' : (s.rssi + ' dBm');
 var u = s.uptime, d = Math.floor(u / 86400), h = Math.floor(u % 86400 / 3600),
@@ -606,8 +747,10 @@ b.disabled = false;
 }
 function save(thenReboot) {
 var d = new URLSearchParams();
-d.append('ssid',   el('ssid').value);
-d.append('pass',   el('pass').value);
+for (var k = 0; k < 3; k++) {
+d.append('ssid' + k, el('ssid' + k).value);
+d.append('pass' + k, el('pass' + k).value);
+}
 d.append('host',   el('host').value);
 d.append('pixels', el('pixels').value);
 d.append('bright', el('bright').value);
@@ -622,7 +765,7 @@ method: 'POST',
 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
 body: d.toString()
 }).then(function (r) { return r.json(); }).then(function (res) {
-el('pass').value = '';
+for (var k = 0; k < 3; k++) el('pass' + k).value = '';
 if (thenReboot || res.reboot) {
 toast('Đã lưu — đang khởi động lại…');
 fetch('/api/reboot', { method: 'POST' });
@@ -637,6 +780,7 @@ fetch('/api/reset', { method: 'POST' }).then(function () {
 toast('Đã xoá — đang khởi động lại…');
 });
 }
+buildWifis();
 buildStates();
 loadConfig();
 loadStatus();

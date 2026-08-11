@@ -75,11 +75,7 @@ Kiểm tra: `curl http://cc-reminder.local/api/status`
 Chép nội dung `host/settings.example.json` vào `~/.claude/settings.json`, sửa
 đường dẫn cho đúng.
 
-Nếu mDNS `.local` không resolve được (thường gặp trên WSL), đặt IP tĩnh:
-
-```bash
-export CC_REMINDER_HOST=192.168.1.50
-```
+Script tự tìm thiết bị, không cần đặt IP. Xem mục "Mang đi đâu cũng chạy".
 
 Script luôn trả về exit code 0 kể cả khi không kết nối được, nên đèn offline sẽ
 không làm Claude Code bị fail.
@@ -95,11 +91,11 @@ lại để đổi WiFi hoặc màu đèn**. Cấu hình lưu trong EEPROM.
 2. Đèn **đập xanh dương** = đang ở chế độ AP, chờ cấu hình
 3. Kết nối WiFi `cc-reminder-setup` (mở, không mật khẩu)
 4. Mở `http://192.168.4.1` — điện thoại thường tự bung trang lên nhờ captive portal
-5. Bấm **Quét**, chọn WiFi, nhập mật khẩu, bấm **Lưu & khởi động lại**
+5. Bấm **Quét**, điền tối đa 3 mạng WiFi, bấm **Lưu & khởi động lại**
 
 Sau đó vào `http://cc-reminder.local` (hoặc IP) để cấu hình tiếp.
 
-Nếu mất WiFi cũ, thiết bị tự quay lại chế độ AP sau ~15 giây thử kết nối.
+Nếu không mạng nào trong danh sách khả dụng, thiết bị quay về chế độ AP.
 
 ### Cấu hình được gì
 
@@ -110,7 +106,8 @@ Nếu mất WiFi cũ, thiết bị tự quay lại chế độ AP sau ~15 giây 
 | Thứ tự màu | GRB / RGB — sửa lỗi "đỏ ra xanh lá" ngay từ web, khỏi nạp lại |
 | Màu từng trạng thái | color picker cho IDLE / WORKING / INTERACT |
 | Nhịp đập | bật/tắt và chu kỳ riêng cho từng trạng thái |
-| WiFi, hostname | cần khởi động lại |
+| 3 mạng WiFi | nhà / công ty / hotspot, cần khởi động lại |
+| Hostname | cần khởi động lại |
 
 Có sẵn 3 nút thử IDLE / WORKING / INTERACT để xem màu ngay trên đèn thật, và
 nút xoá cấu hình về mặc định.
@@ -138,7 +135,8 @@ sẽ ghi đè.
 | `GET /` | trang cấu hình |
 | `GET /state?s=IDLE\|WORKING\|INTERACT` | đổi trạng thái (dùng cho hook) |
 | `GET /status` | tên trạng thái, dạng text |
-| `GET /api/status` | JSON: state, ap, ssid, ip, rssi, uptime, heap |
+| `GET /api/status` | JSON: state, ap, slot, ssid, ip, rssi, uptime, heap |
+| UDP `:45678` gửi `CCR?` | trả về JSON có IP — dùng để dò thiết bị |
 | `GET /api/config` | JSON cấu hình hiện tại (không có mật khẩu) |
 | `POST /api/config` | lưu cấu hình, form-urlencoded |
 | `GET /api/scan` | quét WiFi |
@@ -152,6 +150,66 @@ không phải sửa gì.
 `firmware-minimal/` là bản đơn giản: WiFi hardcode trong `config.h`, không có
 trang web. Nhẹ hơn, ít thứ có thể sai hơn. Dùng nếu bạn không cần cấu hình
 qua web.
+
+## Mang đi đâu cũng chạy
+
+Đèn báo trạng thái thì phải nằm cạnh mắt bạn mới có nghĩa, nên nó di chuyển
+cùng laptop — nhà, công ty, quán. Firmware xử lý việc này ở hai đầu:
+
+**Thiết bị nhớ 3 mạng WiFi.** Bật nguồn ở đâu, nó quét xem mạng nào trong
+danh sách đang có mặt rồi nối vào mạng **mạnh nhất**. Không phải cấu hình lại.
+Ba slot đủ cho nhà, công ty, và hotspot điện thoại. Mất WiFi quá 20 giây thì
+nó tự quét lại từ đầu — rút ở nhà cắm ở công ty là xong, không cần làm gì.
+
+**Host script tự tìm IP.** IP đổi theo từng mạng nên script dò theo thứ tự,
+được bước nào thì cache lại:
+
+| Bước | Khi nào dùng | Thời gian |
+|---|---|---|
+| 1. Biến `CC_REMINDER_HOST` | khi bạn muốn ép cứng | — |
+| 2. Cache từ lần trước | ~99% trường hợp | ~30ms |
+| 3. mDNS `cc-reminder.local` | macOS, Linux | ~200ms |
+| 4. UDP broadcast `CCR?` :45678 | khi mDNS chết | ~50ms |
+| 5. Quét subnet /24 | khi broadcast không qua được | ~1s |
+
+Bước 5 tồn tại vì **WSL2**. Mạng WSL2 là mạng NAT riêng nên broadcast và mDNS
+không ra được LAN thật, nhưng kết nối unicast tới IP LAN thì được. Script lấy
+subnet LAN từ `ipconfig.exe` rồi quét.
+
+Muốn bỏ hẳn bước 5: Windows 11 + WSL bật mirrored networking. Thêm vào
+`C:\Users\<bạn>\.wslconfig`:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+Lúc đó broadcast và mDNS chạy bình thường.
+
+Lệnh hữu ích:
+
+```bash
+python3 host/cc_reminder_http.py discover   # do lai, in ra IP
+python3 host/cc_reminder_http.py forget     # xoa cache
+CC_REMINDER_DEBUG=1 python3 host/cc_reminder_http.py IDLE   # xem dung buoc nao
+```
+
+### Hai thứ sẽ cắn bạn ở WiFi công ty
+
+**WPA2-Enterprise (802.1X/PEAP).** Nếu WiFi công ty đăng nhập bằng tài khoản
+chứ không phải mật khẩu chung, firmware này không nối được — nó dùng
+`WiFi.begin(ssid, pass)` thuần. Đường tránh: mạng guest, hoặc hotspot điện thoại.
+
+**Client isolation.** Nhiều mạng công ty và mạng guest chặn máy-nói-với-máy
+trong cùng SSID. Khi đó dù cùng LAN, laptop vẫn không gọi được đèn. Thử trước
+bằng cách ping điện thoại từ laptop khi cả hai cùng WiFi. Nếu bị chặn thì dùng
+hotspot điện thoại — mạng của bạn, không có isolation.
+
+Tôi đã cân nhắc MQTT cho trường hợp này (cả hai bên đều đi ra ngoài nên xuyên
+được isolation) nhưng bỏ: broker công cộng đều bắt buộc TLS, mà BearSSL trên
+ESP8266 ngốn 16–20KB RAM mỗi handshake, chạy cạnh web server và DMA trên chip
+80KB là dễ crash ngẫu nhiên. Hotspot điện thoại giải quyết cùng vấn đề mà
+không thêm gì.
 
 ## Vỏ in 3D
 
