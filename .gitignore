@@ -1,5 +1,5 @@
 # WiFi credentials - KHONG commit
-firmware/src/config.h
+firmware-minimal/src/config.h
 test/src/config.h
 
 # PlatformIO

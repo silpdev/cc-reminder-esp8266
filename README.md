@@ -63,14 +63,12 @@ sửa `NeoGrbFeature` thành `NeoRgbFeature`.
 
 ```bash
 cd firmware
-cp src/config.h.example src/config.h
-$EDITOR src/config.h          # dien WiFi SSID / password
 pio run -t upload
 ```
 
-`config.h` nằm trong `.gitignore` nên mật khẩu WiFi không bị commit lên.
+Không cần sửa code — WiFi cấu hình qua trang web, xem mục bên dưới.
 
-Kiểm tra: `curl http://cc-reminder.local/`
+Kiểm tra: `curl http://cc-reminder.local/api/status`
 
 ### 3. Cấu hình hook Claude Code
 
@@ -85,6 +83,75 @@ export CC_REMINDER_HOST=192.168.1.50
 
 Script luôn trả về exit code 0 kể cả khi không kết nối được, nên đèn offline sẽ
 không làm Claude Code bị fail.
+
+## Trang web cấu hình
+
+Firmware trong `firmware/` có trang web cấu hình, **không cần sửa code hay nạp
+lại để đổi WiFi hoặc màu đèn**. Cấu hình lưu trong EEPROM.
+
+### Lần đầu
+
+1. Nạp firmware, cấp nguồn
+2. Đèn **đập xanh dương** = đang ở chế độ AP, chờ cấu hình
+3. Kết nối WiFi `cc-reminder-setup` (mở, không mật khẩu)
+4. Mở `http://192.168.4.1` — điện thoại thường tự bung trang lên nhờ captive portal
+5. Bấm **Quét**, chọn WiFi, nhập mật khẩu, bấm **Lưu & khởi động lại**
+
+Sau đó vào `http://cc-reminder.local` (hoặc IP) để cấu hình tiếp.
+
+Nếu mất WiFi cũ, thiết bị tự quay lại chế độ AP sau ~15 giây thử kết nối.
+
+### Cấu hình được gì
+
+| | Ghi chú |
+|---|---|
+| Độ sáng | 1–255, áp dụng ngay |
+| Số LED | 1–24, cần khởi động lại |
+| Thứ tự màu | GRB / RGB — sửa lỗi "đỏ ra xanh lá" ngay từ web, khỏi nạp lại |
+| Màu từng trạng thái | color picker cho IDLE / WORKING / INTERACT |
+| Nhịp đập | bật/tắt và chu kỳ riêng cho từng trạng thái |
+| WiFi, hostname | cần khởi động lại |
+
+Có sẵn 3 nút thử IDLE / WORKING / INTERACT để xem màu ngay trên đèn thật, và
+nút xoá cấu hình về mặc định.
+
+Mật khẩu WiFi **không bao giờ được gửi về trình duyệt**. Để trống ô mật khẩu
+khi lưu thì mật khẩu cũ được giữ nguyên.
+
+### Sửa trang web
+
+HTML nằm ở `firmware/web/page.html`, được nhúng vào PROGMEM trong `main.cpp`.
+Sau khi sửa HTML:
+
+```bash
+python3 tools/embed_page.py
+```
+
+Script chỉ thay phần giữa 2 marker `PAGE BEGIN` / `PAGE END`, không đụng vào
+code còn lại. Đừng sửa HTML trực tiếp trong `main.cpp` — lần chạy script sau
+sẽ ghi đè.
+
+### API
+
+| Endpoint | |
+|---|---|
+| `GET /` | trang cấu hình |
+| `GET /state?s=IDLE\|WORKING\|INTERACT` | đổi trạng thái (dùng cho hook) |
+| `GET /status` | tên trạng thái, dạng text |
+| `GET /api/status` | JSON: state, ap, ssid, ip, rssi, uptime, heap |
+| `GET /api/config` | JSON cấu hình hiện tại (không có mật khẩu) |
+| `POST /api/config` | lưu cấu hình, form-urlencoded |
+| `GET /api/scan` | quét WiFi |
+| `POST /api/reboot`, `POST /api/reset` | khởi động lại / xoá cấu hình |
+
+`/state` và `/status` giữ nguyên như bản cũ nên `host/cc_reminder_http.py`
+không phải sửa gì.
+
+### firmware-minimal
+
+`firmware-minimal/` là bản đơn giản: WiFi hardcode trong `config.h`, không có
+trang web. Nhẹ hơn, ít thứ có thể sai hơn. Dùng nếu bạn không cần cấu hình
+qua web.
 
 ## Vỏ in 3D
 
@@ -151,14 +218,6 @@ openscad -D 'part="base"' -o base.stl cc_reminder_case.scad
 5. Nối dây theo bảng ở trên
 6. Trượt `led_bar` xuống 2 rãnh ở thành ±Y
 7. Ấn nắp vào — 8 nub trên gờ cắm sẽ giữ khít
-
-## API
-
-| Endpoint | |
-|---|---|
-| `GET /` | trang trạng thái dạng text (state, IP, RSSI, uptime) |
-| `GET /state?s=IDLE\|WORKING\|INTERACT` | đổi trạng thái |
-| `GET /status` | tên trạng thái hiện tại |
 
 ## Ghi chú kỹ thuật
 

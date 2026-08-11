@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="vi"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cc-reminder</title>
+<style>
+:root{--bg:#15171c;--card:#1e2128;--line:#2c313b;--tx:#e6e8ec;--dim:#8b93a1;--ac:#4a9eff}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--tx);
+  font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  max-width:520px;margin:0 auto}
+h1{font-size:19px;margin:8px 0 4px}
+h1 span{color:var(--dim);font-weight:400;font-size:14px}
+h2{font-size:14px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);
+  margin:0 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+  padding:14px;margin:12px 0}
+.row{display:flex;align-items:center;gap:10px;margin:10px 0}
+.row label{flex:1;min-width:0}
+input,select{background:#12141a;color:var(--tx);border:1px solid var(--line);
+  border-radius:7px;padding:8px 10px;font-size:15px;font-family:inherit}
+input[type=text],input[type=password]{width:100%}
+input[type=number]{width:78px}
+input[type=color]{width:46px;height:34px;padding:2px;cursor:pointer}
+input[type=range]{flex:2;accent-color:var(--ac)}
+input[type=checkbox]{width:18px;height:18px;accent-color:var(--ac)}
+button{background:#2a2f39;color:var(--tx);border:1px solid var(--line);
+  border-radius:7px;padding:9px 14px;font-size:14px;font-family:inherit;
+  cursor:pointer}
+button:active{transform:translateY(1px)}
+button.pri{background:var(--ac);border-color:var(--ac);color:#08111d;font-weight:600}
+button.dgr{color:#ff8080}
+.btns{display:flex;gap:8px;flex-wrap:wrap}
+.st{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:14px}
+.st b{color:var(--dim);font-weight:400}
+.mono{font-variant-numeric:tabular-nums}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block;
+  margin-right:6px;vertical-align:middle}
+.hint{color:var(--dim);font-size:13px;margin-top:8px}
+#msg{position:fixed;left:0;right:0;bottom:0;padding:12px;text-align:center;
+  background:var(--ac);color:#08111d;font-weight:600;transform:translateY(100%);
+  transition:transform .2s}
+#msg.on{transform:none}
+</style></head><body>
+
+<h1>cc-reminder <span id="hn"></span></h1>
+
+<div class="card">
+  <h2>Trạng thái</h2>
+  <div class="st">
+    <b>Đèn</b><span id="s-state">—</span>
+    <b>WiFi</b><span id="s-wifi">—</span>
+    <b>IP</b><span id="s-ip" class="mono">—</span>
+    <b>Tín hiệu</b><span id="s-rssi" class="mono">—</span>
+    <b>Uptime</b><span id="s-up" class="mono">—</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Thử đèn</h2>
+  <div class="btns">
+    <button onclick="setState('IDLE')">IDLE</button>
+    <button onclick="setState('WORKING')">WORKING</button>
+    <button onclick="setState('INTERACT')">INTERACT</button>
+  </div>
+  <div class="hint">Bấm để xem màu ngay trên đèn thật.</div>
+</div>
+
+<div class="card">
+  <h2>LED</h2>
+  <div class="row">
+    <label for="bright">Độ sáng <span id="bv" class="mono"></span></label>
+    <input type="range" id="bright" min="1" max="255">
+  </div>
+  <div class="row">
+    <label for="pixels">Số LED</label>
+    <input type="number" id="pixels" min="1" max="24">
+  </div>
+  <div class="row">
+    <label for="order">Thứ tự màu</label>
+    <select id="order">
+      <option value="0">GRB — mặc định</option>
+      <option value="1">RGB — nếu đỏ ra xanh lá</option>
+    </select>
+  </div>
+  <div id="states"></div>
+  <div class="hint">Bỏ tick “nhịp” để đèn sáng đứng. Chu kỳ tính bằng ms.</div>
+</div>
+
+<div class="card">
+  <h2>WiFi</h2>
+  <div class="row">
+    <label for="ssid">SSID</label>
+    <button onclick="scan()" id="btn-scan">Quét</button>
+  </div>
+  <div class="row"><input type="text" id="ssid" list="nets" autocomplete="off">
+    <datalist id="nets"></datalist></div>
+  <div class="row"><label for="pass">Mật khẩu</label></div>
+  <div class="row"><input type="password" id="pass" placeholder="để trống = giữ nguyên"></div>
+  <div class="row"><label for="host">Hostname</label></div>
+  <div class="row"><input type="text" id="host" autocomplete="off"></div>
+  <div class="hint">Đổi WiFi, hostname hoặc số LED thì thiết bị cần khởi động lại.</div>
+</div>
+
+<div class="card">
+  <div class="btns">
+    <button class="pri" onclick="save(0)">Lưu</button>
+    <button onclick="save(1)">Lưu &amp; khởi động lại</button>
+    <button class="dgr" onclick="factoryReset()">Xoá cấu hình</button>
+  </div>
+</div>
+
+<div id="msg"></div>
+
+<script>
+var NAMES = ['IDLE', 'WORKING', 'INTERACT'];
+
+function el(id) { return document.getElementById(id); }
+
+function toast(t) {
+  var m = el('msg');
+  m.textContent = t;
+  m.classList.add('on');
+  setTimeout(function () { m.classList.remove('on'); }, 2200);
+}
+
+function buildStates() {
+  var h = '';
+  for (var i = 0; i < 3; i++) {
+    h += '<div class="row">' +
+         '<label for="c' + i + '">' + NAMES[i] + '</label>' +
+         '<input type="color" id="c' + i + '">' +
+         '<label for="p' + i + '" style="flex:0 0 auto">nhịp</label>' +
+         '<input type="checkbox" id="p' + i + '">' +
+         '<input type="number" id="t' + i + '" min="200" max="10000" step="100">' +
+         '</div>';
+  }
+  el('states').innerHTML = h;
+}
+
+function loadConfig() {
+  fetch('/api/config').then(function (r) { return r.json(); }).then(function (c) {
+    el('ssid').value   = c.ssid;
+    el('host').value   = c.host;
+    el('pixels').value = c.pixels;
+    el('bright').value = c.bright;
+    el('bv').textContent = c.bright;
+    el('order').value  = c.order;
+    for (var i = 0; i < 3; i++) {
+      el('c' + i).value   = c.col[i];
+      el('p' + i).checked = c.pulse[i] === 1;
+      el('t' + i).value   = c.period[i];
+    }
+  }).catch(function () { toast('Không đọc được cấu hình'); });
+}
+
+function loadStatus() {
+  fetch('/api/status').then(function (r) { return r.json(); }).then(function (s) {
+    var col = { IDLE: '#22c55e', WORKING: '#f59e0b', INTERACT: '#ef4444' };
+    el('s-state').innerHTML =
+      '<span class="dot" style="background:' + (col[s.state] || '#888') + '"></span>' + s.state;
+    el('s-wifi').textContent = s.ap ? 'Chế độ AP (chưa cấu hình)' : (s.ssid || '—');
+    el('s-ip').textContent   = s.ip;
+    el('s-rssi').textContent = s.ap ? '—' : (s.rssi + ' dBm');
+    var u = s.uptime, d = Math.floor(u / 86400), h = Math.floor(u % 86400 / 3600),
+        m = Math.floor(u % 3600 / 60);
+    el('s-up').textContent = (d ? d + 'd ' : '') + h + 'h ' + m + 'm';
+    el('hn').textContent = s.host ? s.host + '.local' : '';
+  }).catch(function () {});
+}
+
+function setState(s) {
+  fetch('/state?s=' + s).then(function () { loadStatus(); });
+}
+
+function scan() {
+  var b = el('btn-scan');
+  b.textContent = 'Đang quét…';
+  b.disabled = true;
+  fetch('/api/scan').then(function (r) { return r.json(); }).then(function (list) {
+    list.sort(function (a, b2) { return b2.rssi - a.rssi; });
+    var h = '';
+    for (var i = 0; i < list.length; i++) {
+      h += '<option value="' + list[i].ssid.replace(/"/g, '&quot;') + '">' +
+           list[i].rssi + ' dBm</option>';
+    }
+    el('nets').innerHTML = h;
+    toast('Thấy ' + list.length + ' mạng — bấm vào ô SSID để chọn');
+  }).catch(function () {
+    toast('Quét thất bại');
+  }).then(function () {
+    b.textContent = 'Quét';
+    b.disabled = false;
+  });
+}
+
+function save(thenReboot) {
+  var d = new URLSearchParams();
+  d.append('ssid',   el('ssid').value);
+  d.append('pass',   el('pass').value);
+  d.append('host',   el('host').value);
+  d.append('pixels', el('pixels').value);
+  d.append('bright', el('bright').value);
+  d.append('order',  el('order').value);
+  for (var i = 0; i < 3; i++) {
+    d.append('c' + i, el('c' + i).value);
+    d.append('p' + i, el('p' + i).checked ? '1' : '0');
+    d.append('t' + i, el('t' + i).value);
+  }
+  fetch('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: d.toString()
+  }).then(function (r) { return r.json(); }).then(function (res) {
+    el('pass').value = '';
+    if (thenReboot || res.reboot) {
+      toast('Đã lưu — đang khởi động lại…');
+      fetch('/api/reboot', { method: 'POST' });
+    } else {
+      toast('Đã lưu, áp dụng ngay');
+    }
+  }).catch(function () { toast('Lưu thất bại'); });
+}
+
+function factoryReset() {
+  if (!confirm('Xoá toàn bộ cấu hình, kể cả WiFi. Thiết bị sẽ quay về chế độ AP. Tiếp tục?')) return;
+  fetch('/api/reset', { method: 'POST' }).then(function () {
+    toast('Đã xoá — đang khởi động lại…');
+  });
+}
+
+buildStates();
+loadConfig();
+loadStatus();
+el('bright').addEventListener('input', function () { el('bv').textContent = this.value; });
+setInterval(loadStatus, 3000);
+</script>
+</body></html>
