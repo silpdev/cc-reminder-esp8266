@@ -292,8 +292,13 @@ def main() -> int:
             print("khong tim thay thiet bi", file=sys.stderr)
         return 0
 
+    # QUAN TRONG: khi dat trang thai, KHONG in gi ra stdout.
+    # Claude Code them stdout cua hook UserPromptSubmit vao context cua Claude,
+    # nen mot dong "OK WORKING" se bi nhoi vao context o moi luot prompt.
+    quiet = True
     if arg == "STATUS":
         path = "/status"
+        quiet = False
     elif arg in VALID:
         path = f"/state?s={arg}"
     else:
@@ -311,8 +316,10 @@ def main() -> int:
         ip = resolve(force=True)
         if ip:
             body = http_get(ip, path, T_VERIFY)
-    if body is not None:
+    if body is not None and not quiet:
         print(body)
+    elif body is not None:
+        log(body)
     return 0
 
 

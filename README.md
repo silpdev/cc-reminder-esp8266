@@ -72,13 +72,54 @@ Kiểm tra: `curl http://cc-reminder.local/api/status`
 
 ### 3. Cấu hình hook Claude Code
 
-Chép nội dung `host/settings.example.json` vào `~/.claude/settings.json`, sửa
-đường dẫn cho đúng.
+Chép `host/settings.example.json` vào `~/.claude/settings.json`, sửa đường dẫn.
+Kiểm tra bằng `/hooks` trong Claude Code — menu đó liệt kê mọi hook đang có và
+cho biết nó đến từ file settings nào.
 
-Script tự tìm thiết bị, không cần đặt IP. Xem mục "Mang đi đâu cũng chạy".
+| Event | Trạng thái | Tại sao chọn event này |
+|---|---|---|
+| `SessionStart` | IDLE | đặt lại đèn khi mở session |
+| `UserPromptSubmit` | WORKING | bắn ngay khi bạn gửi prompt |
+| `Notification` | INTERACT | matcher `permission_prompt\|idle_prompt\|agent_needs_input` |
+| `Stop` | IDLE | Claude trả lời xong |
+| `SessionEnd` | IDLE | đóng session |
 
-Script luôn trả về exit code 0 kể cả khi không kết nối được, nên đèn offline sẽ
-không làm Claude Code bị fail.
+**Vì sao `Notification` mà không phải `PermissionRequest`.** Cả hai đều có thật.
+Nhưng `PermissionRequest` bắn mỗi khi có quyết định về quyền, kể cả những lần
+được rule tự cho qua mà không hỏi bạn — đèn sẽ nháy đỏ vô ích.
+`Notification` với matcher trên chỉ bắn khi Claude **thật sự đang chờ bạn**, và
+bắt thêm cả trường hợp đứng chờ mà không phải xin quyền (`idle_prompt`), đúng
+là lúc bạn cần đèn báo nhất. Muốn dùng `PermissionRequest` thì cũng được, thêm
+song song vào cũng không sao.
+
+**Mọi hook đều `async: true`.** Hook chạy nền, không chặn session. Nếu không có
+cờ này, `UserPromptSubmit` sẽ chặn Claude xử lý prompt cho tới khi hook xong —
+mà bước dò IP lần đầu có thể mất ~1 giây.
+
+**Dùng exec form (`command` + `args`).** Mỗi phần tử `args` được truyền thành
+đúng một tham số, không qua shell, nên đường dẫn có dấu cách cũng không sao.
+
+### Vì sao script luôn exit 0
+
+Đây không phải chi tiết nhỏ. Trong Claude Code, exit code 2 của hook có nghĩa
+khác nhau tùy event, và với các event mình dùng thì rất tệ:
+
+| Event | Exit 2 gây ra |
+|---|---|
+| `UserPromptSubmit` | **chặn prompt và xoá nó khỏi context** |
+| `Stop` | **ngăn Claude dừng, bắt nó tiếp tục** |
+
+Nghĩa là một cái đèn LED rút phích có thể làm treo phiên làm việc của bạn.
+Script bắt mọi exception và luôn trả về 0, kể cả khi không tìm thấy thiết bị.
+
+### Vì sao script không in ra stdout
+
+Với `UserPromptSubmit`, Claude Code lấy stdout của hook làm **context cho
+Claude đọc**. Nên script chỉ in khi bạn gọi tay (`STATUS`, `discover`); lúc đổi
+trạng thái nó im lặng hoàn toàn. Muốn xem log thì đặt `CC_REMINDER_DEBUG=1`,
+log đi ra stderr.
+
+Tài liệu hook: https://code.claude.com/docs/en/hooks
 
 ## Trang web cấu hình
 

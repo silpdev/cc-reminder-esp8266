@@ -1,13 +1,66 @@
 {
+  "_comment": "Chep vao ~/.claude/settings.json va sua duong dan. Xem README de biet vi sao chon dung cac event nay.",
   "hooks": {
-    "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "python3 ~/cc-reminder-esp8266/host/cc_reminder_http.py WORKING", "timeout": 10 }] }
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["$HOME/cc-reminder-esp8266/host/cc_reminder_http.py", "IDLE"],
+            "async": true
+          }
+        ]
+      }
     ],
-    "PermissionRequest": [
-      { "hooks": [{ "type": "command", "command": "python3 ~/cc-reminder-esp8266/host/cc_reminder_http.py INTERACT", "timeout": 10 }] }
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["$HOME/cc-reminder-esp8266/host/cc_reminder_http.py", "WORKING"],
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|idle_prompt|agent_needs_input",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["$HOME/cc-reminder-esp8266/host/cc_reminder_http.py", "INTERACT"],
+            "async": true
+          }
+        ]
+      }
     ],
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "python3 ~/cc-reminder-esp8266/host/cc_reminder_http.py IDLE", "timeout": 10 }] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["$HOME/cc-reminder-esp8266/host/cc_reminder_http.py", "IDLE"],
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["$HOME/cc-reminder-esp8266/host/cc_reminder_http.py", "IDLE"],
+            "async": true
+          }
+        ]
+      }
     ]
   }
 }
