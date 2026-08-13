@@ -177,7 +177,7 @@ sẽ ghi đè.
 | `GET /` | trang cấu hình |
 | `GET /state?s=IDLE\|WORKING\|INTERACT` | đổi trạng thái (dùng cho hook) |
 | `GET /status` | tên trạng thái, dạng text |
-| `GET /api/status` | JSON: state, ap, slot, ssid, ip, rssi, uptime, heap |
+| `GET /api/status` | JSON: state, ap, slot, ssid, ip, host, rssi, uptime, heap, fx, fxname, idlefor |
 | UDP `:45678` gửi `CCR?` | trả về JSON có IP — dùng để dò thiết bị |
 | `GET /api/config` | JSON cấu hình hiện tại (không có mật khẩu) |
 | `POST /api/config` | lưu cấu hình, form-urlencoded |
