@@ -53,6 +53,7 @@ button.dgr{color:#ff8080}
     <b>IP</b><span id="s-ip" class="mono">—</span>
     <b>Tín hiệu</b><span id="s-rssi" class="mono">—</span>
     <b>Uptime</b><span id="s-up" class="mono">—</span>
+    <b>Ambient</b><span id="s-fx">—</span>
   </div>
 </div>
 
@@ -85,6 +86,41 @@ button.dgr{color:#ff8080}
   </div>
   <div id="states"></div>
   <div class="hint">Bỏ tick “nhịp” để đèn sáng đứng. Chu kỳ tính bằng ms.</div>
+</div>
+
+<div class="card">
+  <h2>Ambient</h2>
+  <div class="row">
+    <label for="idle">Chạy hiệu ứng sau khi IDLE (giây, 0 = tắt)</label>
+    <input type="number" id="idle" min="0" max="86400" step="30">
+  </div>
+  <div class="row">
+    <label for="fx">Hiệu ứng</label>
+    <select id="fx">
+      <option value="0">Tắt</option>
+      <option value="1">Nến cháy</option>
+      <option value="2">Cầu vồng trôi</option>
+      <option value="3">Nhịp thở</option>
+      <option value="4">Lấp lánh</option>
+      <option value="5">Cực quang</option>
+    </select>
+  </div>
+  <div class="row">
+    <label for="fxb">Độ sáng <span id="fxbv" class="mono"></span></label>
+    <input type="range" id="fxb" min="1" max="255">
+  </div>
+  <div class="row">
+    <label for="fxs">Tốc độ <span id="fxsv" class="mono"></span></label>
+    <input type="range" id="fxs" min="1" max="10">
+  </div>
+  <div class="row">
+    <label for="fxc">Màu (dùng cho Nhịp thở)</label>
+    <input type="color" id="fxc">
+  </div>
+  <div class="btns"><button onclick="preview()">Xem thử 15 giây</button></div>
+  <div class="hint">Chỉ có 1 LED nên đây đều là hiệu ứng theo thời gian. Cắt
+  thêm LED thì Cầu vồng, Lấp lánh và Cực quang tự thành hiệu ứng chạy dọc.
+  Độ sáng để thấp hơn hẳn trạng thái vì ambient chạy lúc bạn không nhìn.</div>
 </div>
 
 <div class="card">
@@ -168,6 +204,13 @@ function loadConfig() {
       el('p' + i).checked = c.pulse[i] === 1;
       el('t' + i).value   = c.period[i];
     }
+    el('idle').value = c.idle;
+    el('fx').value   = c.fx;
+    el('fxb').value  = c.fxb;
+    el('fxs').value  = c.fxs;
+    el('fxc').value  = c.fxc;
+    el('fxbv').textContent = c.fxb;
+    el('fxsv').textContent = c.fxs;
   }).catch(function () { toast('Không đọc được cấu hình'); });
 }
 
@@ -179,6 +222,8 @@ function loadStatus() {
     el('s-wifi').textContent = s.ap ? 'Chế độ AP (chưa cấu hình)'
       : ((s.ssid || '—') + (s.slot >= 0 ? '  (#' + (s.slot + 1) + ')' : ''));
     el('s-ip').textContent   = s.ip;
+    el('s-fx').textContent = s.fx ? ('đang chạy — ' + s.fxname)
+      : (s.fxname === 'off' ? 'tắt' : 'chờ ' + s.idlefor + 's');
     el('s-rssi').textContent = s.ap ? '—' : (s.rssi + ' dBm');
     var u = s.uptime, d = Math.floor(u / 86400), h = Math.floor(u % 86400 / 3600),
         m = Math.floor(u % 3600 / 60);
@@ -219,6 +264,11 @@ function save(thenReboot) {
     d.append('pass' + k, el('pass' + k).value);
   }
   d.append('host',   el('host').value);
+  d.append('idle',   el('idle').value);
+  d.append('fx',     el('fx').value);
+  d.append('fxs',    el('fxs').value);
+  d.append('fxb',    el('fxb').value);
+  d.append('fxc',    el('fxc').value);
   d.append('pixels', el('pixels').value);
   d.append('bright', el('bright').value);
   d.append('order',  el('order').value);
@@ -242,6 +292,13 @@ function save(thenReboot) {
   }).catch(function () { toast('Lưu thất bại'); });
 }
 
+function preview() {
+  fetch('/api/preview?fx=' + el('fx').value, { method: 'POST' })
+    .then(function (r) { return r.json(); })
+    .then(function (res) { toast('Xem thử ' + res.fx + ' — ' + res.seconds + 's'); })
+    .catch(function () { toast('Không xem thử được'); });
+}
+
 function factoryReset() {
   if (!confirm('Xoá toàn bộ cấu hình, kể cả WiFi. Thiết bị sẽ quay về chế độ AP. Tiếp tục?')) return;
   fetch('/api/reset', { method: 'POST' }).then(function () {
@@ -254,6 +311,8 @@ buildStates();
 loadConfig();
 loadStatus();
 el('bright').addEventListener('input', function () { el('bv').textContent = this.value; });
+el('fxb').addEventListener('input', function () { el('fxbv').textContent = this.value; });
+el('fxs').addEventListener('input', function () { el('fxsv').textContent = this.value; });
 setInterval(loadStatus, 3000);
 </script>
 </body></html>

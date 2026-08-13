@@ -147,6 +147,7 @@ Nếu không mạng nào trong danh sách khả dụng, thiết bị quay về c
 | Thứ tự màu | GRB / RGB — sửa lỗi "đỏ ra xanh lá" ngay từ web, khỏi nạp lại |
 | Màu từng trạng thái | color picker cho IDLE / WORKING / INTERACT |
 | Nhịp đập | bật/tắt và chu kỳ riêng cho từng trạng thái |
+| Ambient | thời gian chờ, hiệu ứng, tốc độ, độ sáng riêng, màu |
 | 3 mạng WiFi | nhà / công ty / hotspot, cần khởi động lại |
 | Hostname | cần khởi động lại |
 
@@ -181,6 +182,7 @@ sẽ ghi đè.
 | `GET /api/config` | JSON cấu hình hiện tại (không có mật khẩu) |
 | `POST /api/config` | lưu cấu hình, form-urlencoded |
 | `GET /api/scan` | quét WiFi |
+| `POST /api/preview?fx=N` | xem thử hiệu ứng 15s, không lưu |
 | `POST /api/reboot`, `POST /api/reset` | khởi động lại / xoá cấu hình |
 
 `/state` và `/status` giữ nguyên như bản cũ nên `host/cc_reminder_http.py`
@@ -191,6 +193,41 @@ không phải sửa gì.
 `firmware-minimal/` là bản đơn giản: WiFi hardcode trong `config.h`, không có
 trang web. Nhẹ hơn, ít thứ có thể sai hơn. Dùng nếu bạn không cần cấu hình
 qua web.
+
+## Ambient — IDLE lâu thì bật hiệu ứng
+
+IDLE quá lâu (mặc định 5 phút) thì đèn chuyển sang hiệu ứng trang trí, và trở
+lại ngay khi có hook bắn tới.
+
+**Giới hạn cần biết:** với 1 LED thì mọi hiệu ứng *không gian* — chạy đuổi, sao
+băng, cầu vồng trải dọc — đều vô nghĩa. Năm hiệu ứng dưới đây đều là hiệu ứng
+*theo thời gian*, chọn để đẹp ở 1 pixel. Engine viết cho N pixel, nên cắt thêm
+LED thì Cầu vồng, Lấp lánh và Cực quang tự thành hiệu ứng chạy dọc nhờ độ lệch
+pha giữa các pixel.
+
+| Hiệu ứng | Cảm giác | Cách làm |
+|---|---|---|
+| Nến cháy | lửa thật, không theo chu kỳ | random walk nhân 2 sine lệch tần (6.1 và 13.7 rad/s) |
+| Cầu vồng trôi | đổi màu rất chậm | hue tăng đều 0.035/s |
+| Nhịp thở | trầm, một màu bạn chọn | cosine, sàn 12% |
+| Lấp lánh | đom đóm, ~2.6s một lần lóe | (sin·sin)³ — đỉnh nhọn, phần lớn tối |
+| Cực quang | teal ↔ tím dịch chuyển | 2 sine lệch pha điều khiển hue và độ sáng riêng |
+
+Độ sáng ambient có thang riêng, mặc định **28/255** — tối hơn hẳn trạng thái, vì
+ambient chạy đúng lúc bạn không nhìn vào nó. Đo trên mô phỏng thì độ chói đỉnh
+của cả 5 hiệu ứng đều dưới 26/255.
+
+Nút **Xem thử 15 giây** trên trang cấu hình chạy hiệu ứng ngay trên đèn thật mà
+không lưu vào EEPROM, nên thử thoải mái.
+
+Đặt `idle = 0` để tắt hẳn ambient.
+
+### Thêm: làm mịn chuyển màu
+
+Đổi trạng thái giờ không snap nữa. Mỗi frame màu tiến 25% về đích, hằng số thời
+gian ~60ms ở 50Hz — đủ xoá cảm giác giật, không đủ để làm chậm nhịp đập của
+INTERACT (chu kỳ 900ms). Chỉ áp dụng cho đường một-màu-đồng-nhất; hiệu ứng
+ambient vẽ trực tiếp vì phần rung của Nến và Lấp lánh là cố ý.
 
 ## Mang đi đâu cũng chạy
 

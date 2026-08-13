@@ -21,3 +21,6 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# oh-my-claudecode session state
+.omc/

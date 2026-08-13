@@ -39,7 +39,9 @@
 /* ===================== hang so ===================== */
 #define MAX_PIXELS    24
 #define NET_SLOTS     3
-#define CFG_MAGIC     0x43524D34UL     // doi so = xoa cau hinh cu
+#define CFG_MAGIC     0x43524D35UL     // doi so = xoa cau hinh cu
+#define FX_COUNT      6                // so hieu ung (gom ca "tat")
+#define PREVIEW_MS    15000UL          // xem thu hieu ung bao lau
 #define AP_SSID       "cc-reminder-setup"
 #define EEPROM_SIZE   512
 #define DISCO_PORT    45678
@@ -66,9 +68,21 @@ struct Config {
   uint8_t  col[3][3];
   uint8_t  pulse[3];
   uint16_t period[3];
+
+  /* Ambient: IDLE lau qua thi chuyen sang hieu ung trang tri */
+  uint16_t idleAfter;          // giay; 0 = tat han
+  uint8_t  effect;             // 0 tat, 1 nen, 2 cau vong, 3 nhip tho,
+                               // 4 lap lanh, 5 cuc quang
+  uint8_t  fxSpeed;            // 1..10, 5 = binh thuong
+  uint8_t  fxBright;           // do sang rieng cho ambient (thuong thap hon)
+  uint8_t  fxCol[3];           // mau dung cho hieu ung nhip tho
 };
 
 Config cfg;
+
+/* Chan loi im lang: them field vao Config ma quen tang EEPROM_SIZE thi
+   EEPROM.put se ghi tran. Bat loi ngay luc bien dich. */
+static_assert(sizeof(Config) <= EEPROM_SIZE, "Config lon hon EEPROM_SIZE");
 
 void setDefaults() {
   memset(&cfg, 0, sizeof(cfg));
@@ -84,6 +98,12 @@ void setDefaults() {
   cfg.pulse[1]  = 1;   cfg.period[1] = 2400;
   cfg.col[2][0] = 255; cfg.col[2][1] = 0;   cfg.col[2][2] = 0;   // INTERACT
   cfg.pulse[2]  = 1;   cfg.period[2] = 900;
+
+  cfg.idleAfter = 300;         // 5 phut
+  cfg.effect    = 1;           // nen
+  cfg.fxSpeed   = 5;
+  cfg.fxBright  = 28;          // toi hon han trang thai - de tren ban ban dem
+  cfg.fxCol[0] = 255; cfg.fxCol[1] = 120; cfg.fxCol[2] = 30;
 }
 
 void loadConfig() {
@@ -108,6 +128,10 @@ void loadConfig() {
   }
   cfg.host[sizeof(cfg.host) - 1] = '\0';
   if (cfg.host[0] == '\0') strncpy(cfg.host, "cc-reminder", sizeof(cfg.host) - 1);
+  if (cfg.effect >= FX_COUNT) cfg.effect = 0;
+  if (cfg.fxSpeed < 1 || cfg.fxSpeed > 10) cfg.fxSpeed = 5;
+  if (cfg.fxBright < 1) cfg.fxBright = 1;
+  if (cfg.idleAfter > 86400) cfg.idleAfter = 300;
 }
 
 void saveConfig() {
@@ -127,15 +151,42 @@ uint8_t netCount() {
 NeoPixelBus<NeoGrbFeature, NeoEsp8266Dma800KbpsMethod> strip(MAX_PIXELS);
 
 uint8_t state = ST_IDLE;
+unsigned long stateAt   = 0;      // luc trang thai doi lan cuoi
+unsigned long previewTil = 0;     // dang xem thu hieu ung den khi nao
+uint8_t previewFx = 0;
+bool    fxActive  = false;        // dang chay ambient?
 
-void writeAll(uint8_t r, uint8_t g, uint8_t b) {
+void setPx(uint16_t i, uint8_t r, uint8_t g, uint8_t b) {
   // order == 1 (strip RGB): dao r/g vi feature dang la GRB
-  RgbColor c = (cfg.order == 1) ? RgbColor(g, r, b) : RgbColor(r, g, b);
-  for (uint16_t i = 0; i < MAX_PIXELS; i++) {
-    strip.SetPixelColor(i, (i < cfg.pixels) ? c : RgbColor(0, 0, 0));
+  strip.SetPixelColor(i, (cfg.order == 1) ? RgbColor(g, r, b) : RgbColor(r, g, b));
+}
+
+void blankRest() {
+  for (uint16_t i = cfg.pixels; i < MAX_PIXELS; i++) setPx(i, 0, 0, 0);
+}
+
+/* Lam min chuyen mau cho duong "mot mau dong nhat".
+   Moi frame tien 25% ve dich -> hang so thoi gian ~60ms o 50Hz.
+   Du de xoa cam giac giat khi doi trang thai, khong du de lam cham nhip dap. */
+float curR = 0, curG = 0, curB = 0;
+
+void fillPx(uint8_t r, uint8_t g, uint8_t b, bool smooth) {
+  if (smooth) {
+    curR += (r - curR) * 0.25f;
+    curG += (g - curG) * 0.25f;
+    curB += (b - curB) * 0.25f;
+  } else {
+    curR = r; curG = g; curB = b;
   }
+  uint8_t rr = (uint8_t)(curR + 0.5f);
+  uint8_t gg = (uint8_t)(curG + 0.5f);
+  uint8_t bb = (uint8_t)(curB + 0.5f);
+  for (uint16_t i = 0; i < cfg.pixels; i++) setPx(i, rr, gg, bb);
+  blankRest();
   strip.Show();
 }
+
+void writeAll(uint8_t r, uint8_t g, uint8_t b) { fillPx(r, g, b, false); }
 
 float pulseK(uint16_t periodMs, float floorK) {
   if (periodMs < 1) periodMs = 1;
@@ -144,19 +195,122 @@ float pulseK(uint16_t periodMs, float floorK) {
   return floorK + (1.0f - floorK) * s;
 }
 
+/* ---------------- hieu ung ambient ----------------
+   Tat ca deu la hieu ung THEO THOI GIAN, khong phai theo khong gian, vi
+   thiet bi mac dinh chi co 1 LED. Cac tham so i (chi so pixel) chi tao do
+   lech pha, nen dat 8-16 LED thi tu nhien thanh hieu ung chay doc.        */
+
+const char* fxName(uint8_t f) {
+  switch (f) {
+    case 1: return "candle";
+    case 2: return "rainbow";
+    case 3: return "breathe";
+    case 4: return "twinkle";
+    case 5: return "aurora";
+    default: return "off";
+  }
+}
+
+void renderEffect(uint8_t fx) {
+  float sp = (float)cfg.fxSpeed / 5.0f;             // 5 = binh thuong
+  float t  = (float)millis() / 1000.0f * sp;
+  float bm = (float)cfg.fxBright / 255.0f;
+
+  // nen: random walk cong 2 sine lech tan -> chay tu nhien, khong theo chu ky
+  static float flick = 0.75f;
+  if (fx == 1) {
+    flick += ((float)random(-45, 46)) / 1000.0f;
+    if (flick < 0.35f) flick = 0.35f;
+    if (flick > 1.0f)  flick = 1.0f;
+  }
+
+  for (uint16_t i = 0; i < cfg.pixels; i++) {
+    float ph = (float)i * 0.55f;                   // do lech pha giua cac pixel
+    float h = 0, sat = 1.0f, v = 0;
+
+    switch (fx) {
+      case 1: {                                    // nen
+        float w = 0.62f + 0.22f * sin(t * 6.1f + ph)
+                        + 0.16f * sin(t * 13.7f + ph);
+        v = bm * flick * (0.55f + 0.45f * w);
+        h = 0.055f + 0.02f * w;                    // cam am, hoi dao quanh
+        sat = 0.92f;
+        break;
+      }
+      case 2: {                                    // cau vong troi
+        h = t * 0.035f + (float)i / (float)cfg.pixels * 0.6f;
+        h = h - floor(h);
+        v = bm;
+        break;
+      }
+      case 3: {                                    // nhip tho theo mau fxCol
+        float k = 0.12f + 0.88f * (0.5f - 0.5f * cos(t * 0.9f + ph));
+        uint8_t r = (uint8_t)(cfg.fxCol[0] * bm * k);
+        uint8_t g = (uint8_t)(cfg.fxCol[1] * bm * k);
+        uint8_t b = (uint8_t)(cfg.fxCol[2] * bm * k);
+        setPx(i, r, g, b);
+        continue;
+      }
+      case 4: {                                    // lap lanh
+        float a  = sin(t * 1.7f  + ph * 3.1f);
+        float b2 = sin(t * 2.63f + ph * 1.7f);
+        float k = a * b2;
+        k = (k > 0) ? k * k * k : 0;                // dinh nhon, phan lon la toi
+        v = bm * (0.06f + 0.94f * k);
+        h = 0.13f; sat = 0.25f;                     // trang am
+        break;
+      }
+      case 5: {                                    // cuc quang
+        h = 0.44f + 0.24f * sin(t * 0.31f + ph);
+        v = bm * (0.35f + 0.65f * (0.5f + 0.5f * sin(t * 0.47f + ph * 1.3f)));
+        sat = 0.85f;
+        break;
+      }
+      default:
+        setPx(i, 0, 0, 0);
+        continue;
+    }
+
+    if (v < 0) v = 0;
+    if (v > 1) v = 1;
+    RgbColor c = RgbColor(HsbColor(h, sat, v));
+    setPx(i, c.R, c.G, c.B);
+  }
+  blankRest();
+  strip.Show();
+  curR = curG = curB = 0;      // reset smoothing de khong keo mau cu vao
+}
+
 void renderLed() {
   static unsigned long last = 0;
-  if (millis() - last < 20) return;
+  if (millis() - last < 20) return;                // ~50Hz
   last = millis();
+
+  // xem thu tu trang cau hinh
+  if (previewTil && millis() < previewTil) {
+    fxActive = true;
+    renderEffect(previewFx);
+    return;
+  }
+  if (previewTil && millis() >= previewTil) {
+    previewTil = 0;
+    stateAt = millis();                            // dem lai tu dau
+  }
+
+  // IDLE lau qua -> ambient
+  bool wantFx = cfg.effect != 0 && cfg.idleAfter > 0 && state == ST_IDLE &&
+                (millis() - stateAt) > (unsigned long)cfg.idleAfter * 1000UL;
+  fxActive = wantFx;
+  if (wantFx) { renderEffect(cfg.effect); return; }
 
   uint8_t s = state;
   float k = 1.0f;
   if (cfg.pulse[s]) k = pulseK(cfg.period[s], (s == ST_INTERACT) ? 0.15f : 0.40f);
 
   float bk = ((float)cfg.bright / 255.0f) * k;
-  writeAll((uint8_t)(cfg.col[s][0] * bk),
-           (uint8_t)(cfg.col[s][1] * bk),
-           (uint8_t)(cfg.col[s][2] * bk));
+  fillPx((uint8_t)(cfg.col[s][0] * bk),
+         (uint8_t)(cfg.col[s][1] * bk),
+         (uint8_t)(cfg.col[s][2] * bk), true);
 }
 
 /* ===================== web / udp ===================== */
@@ -239,7 +393,11 @@ void handleApiStatus() {
   o += "\"host\":\"";   o += jstr(String(cfg.host)); o += "\",";
   o += "\"rssi\":";     o += WiFi.RSSI();      o += ",";
   o += "\"uptime\":";   o += (millis() / 1000); o += ",";
-  o += "\"heap\":";     o += ESP.getFreeHeap();
+  o += "\"heap\":";     o += ESP.getFreeHeap();     o += ",";
+  o += "\"fx\":";       o += (fxActive ? "true" : "false"); o += ",";
+  o += "\"fxname\":\""; o += fxName(previewTil ? previewFx : cfg.effect);
+  o += "\",";
+  o += "\"idlefor\":";  o += ((millis() - stateAt) / 1000);
   o += "}";
   server.send(200, "application/json", o);
 }
@@ -264,7 +422,13 @@ void handleApiConfigGet() {
   for (uint8_t i = 0; i < 3; i++) { o += cfg.pulse[i];  if (i < 2) o += ","; }
   o += "],\"period\":[";
   for (uint8_t i = 0; i < 3; i++) { o += cfg.period[i]; if (i < 2) o += ","; }
-  o += "]}";
+  o += "],";
+  o += "\"idle\":";  o += cfg.idleAfter; o += ",";
+  o += "\"fx\":";    o += cfg.effect;    o += ",";
+  o += "\"fxs\":";   o += cfg.fxSpeed;   o += ",";
+  o += "\"fxb\":";   o += cfg.fxBright;  o += ",";
+  o += "\"fxc\":\""; o += hex3(cfg.fxCol); o += "\"";
+  o += "}";
   server.send(200, "application/json", o);
 }
 
@@ -324,9 +488,38 @@ void handleApiConfigPost() {
       cfg.period[i] = (uint16_t)constrain(server.arg(key).toInt(), 200, 10000);
   }
 
+  if (server.hasArg("idle"))
+    cfg.idleAfter = (uint16_t)constrain(server.arg("idle").toInt(), 0, 86400);
+  if (server.hasArg("fx"))
+    cfg.effect = (uint8_t)constrain(server.arg("fx").toInt(), 0, FX_COUNT - 1);
+  if (server.hasArg("fxs"))
+    cfg.fxSpeed = (uint8_t)constrain(server.arg("fxs").toInt(), 1, 10);
+  if (server.hasArg("fxb"))
+    cfg.fxBright = (uint8_t)constrain(server.arg("fxb").toInt(), 1, 255);
+  if (server.hasArg("fxc")) {
+    uint8_t rgb[3];
+    if (parseHex3(server.arg("fxc"), rgb)) {
+      cfg.fxCol[0] = rgb[0]; cfg.fxCol[1] = rgb[1]; cfg.fxCol[2] = rgb[2];
+    }
+  }
+
   saveConfig();
   String o = "{\"ok\":true,\"reboot\":";
   o += (needReboot ? "true" : "false");
+  o += "}";
+  server.send(200, "application/json", o);
+}
+
+/* Xem thu hieu ung ngay tren den that, tu tat sau PREVIEW_MS.
+   Khong luu vao EEPROM - chi de thu. */
+void handleApiPreview() {
+  int f = server.arg("fx").toInt();
+  previewFx  = (uint8_t)constrain(f, 0, FX_COUNT - 1);
+  previewTil = millis() + PREVIEW_MS;
+  String o = "{\"ok\":true,\"fx\":\"";
+  o += fxName(previewFx);
+  o += "\",\"seconds\":";
+  o += (PREVIEW_MS / 1000);
   o += "}";
   server.send(200, "application/json", o);
 }
@@ -351,6 +544,8 @@ void handleSetState() {
   else if (s == "WORKING")  state = ST_WORKING;
   else if (s == "INTERACT") state = ST_INTERACT;
   else { server.send(400, "text/plain", "BAD_STATE\n"); return; }
+  stateAt    = millis();          // dem lai dong ho idle
+  previewTil = 0;                 // huy xem thu neu dang chay
   server.send(200, "text/plain", String("OK ") + stateName(state) + "\n");
 }
 
@@ -388,6 +583,7 @@ void setupRoutes() {
   server.on("/api/config", HTTP_GET,  handleApiConfigGet);
   server.on("/api/config", HTTP_POST, handleApiConfigPost);
   server.on("/api/scan",   HTTP_GET,  handleApiScan);
+  server.on("/api/preview",HTTP_POST, handleApiPreview);
   server.on("/api/reboot", HTTP_POST, handleReboot);
   server.on("/api/reset",  HTTP_POST, handleFactoryReset);
   server.on("/state",      HTTP_GET,  handleSetState);
@@ -504,7 +700,8 @@ void setup() {
 
   setupRoutes();
   server.begin();
-  state = ST_IDLE;
+  state   = ST_IDLE;
+  stateAt = millis();
   Serial.println("san sang");
 }
 
@@ -601,6 +798,7 @@ transition:transform .2s}
 <b>IP</b><span id="s-ip" class="mono">—</span>
 <b>Tín hiệu</b><span id="s-rssi" class="mono">—</span>
 <b>Uptime</b><span id="s-up" class="mono">—</span>
+<b>Ambient</b><span id="s-fx">—</span>
 </div>
 </div>
 <div class="card">
@@ -631,6 +829,40 @@ transition:transform .2s}
 </div>
 <div id="states"></div>
 <div class="hint">Bỏ tick “nhịp” để đèn sáng đứng. Chu kỳ tính bằng ms.</div>
+</div>
+<div class="card">
+<h2>Ambient</h2>
+<div class="row">
+<label for="idle">Chạy hiệu ứng sau khi IDLE (giây, 0 = tắt)</label>
+<input type="number" id="idle" min="0" max="86400" step="30">
+</div>
+<div class="row">
+<label for="fx">Hiệu ứng</label>
+<select id="fx">
+<option value="0">Tắt</option>
+<option value="1">Nến cháy</option>
+<option value="2">Cầu vồng trôi</option>
+<option value="3">Nhịp thở</option>
+<option value="4">Lấp lánh</option>
+<option value="5">Cực quang</option>
+</select>
+</div>
+<div class="row">
+<label for="fxb">Độ sáng <span id="fxbv" class="mono"></span></label>
+<input type="range" id="fxb" min="1" max="255">
+</div>
+<div class="row">
+<label for="fxs">Tốc độ <span id="fxsv" class="mono"></span></label>
+<input type="range" id="fxs" min="1" max="10">
+</div>
+<div class="row">
+<label for="fxc">Màu (dùng cho Nhịp thở)</label>
+<input type="color" id="fxc">
+</div>
+<div class="btns"><button onclick="preview()">Xem thử 15 giây</button></div>
+<div class="hint">Chỉ có 1 LED nên đây đều là hiệu ứng theo thời gian. Cắt
+thêm LED thì Cầu vồng, Lấp lánh và Cực quang tự thành hiệu ứng chạy dọc.
+Độ sáng để thấp hơn hẳn trạng thái vì ambient chạy lúc bạn không nhìn.</div>
 </div>
 <div class="card">
 <h2>WiFi</h2>
@@ -705,6 +937,13 @@ el('c' + i).value   = c.col[i];
 el('p' + i).checked = c.pulse[i] === 1;
 el('t' + i).value   = c.period[i];
 }
+el('idle').value = c.idle;
+el('fx').value   = c.fx;
+el('fxb').value  = c.fxb;
+el('fxs').value  = c.fxs;
+el('fxc').value  = c.fxc;
+el('fxbv').textContent = c.fxb;
+el('fxsv').textContent = c.fxs;
 }).catch(function () { toast('Không đọc được cấu hình'); });
 }
 function loadStatus() {
@@ -715,6 +954,8 @@ el('s-state').innerHTML =
 el('s-wifi').textContent = s.ap ? 'Chế độ AP (chưa cấu hình)'
 : ((s.ssid || '—') + (s.slot >= 0 ? '  (#' + (s.slot + 1) + ')' : ''));
 el('s-ip').textContent   = s.ip;
+el('s-fx').textContent = s.fx ? ('đang chạy — ' + s.fxname)
+: (s.fxname === 'off' ? 'tắt' : 'chờ ' + s.idlefor + 's');
 el('s-rssi').textContent = s.ap ? '—' : (s.rssi + ' dBm');
 var u = s.uptime, d = Math.floor(u / 86400), h = Math.floor(u % 86400 / 3600),
 m = Math.floor(u % 3600 / 60);
@@ -752,6 +993,11 @@ d.append('ssid' + k, el('ssid' + k).value);
 d.append('pass' + k, el('pass' + k).value);
 }
 d.append('host',   el('host').value);
+d.append('idle',   el('idle').value);
+d.append('fx',     el('fx').value);
+d.append('fxs',    el('fxs').value);
+d.append('fxb',    el('fxb').value);
+d.append('fxc',    el('fxc').value);
 d.append('pixels', el('pixels').value);
 d.append('bright', el('bright').value);
 d.append('order',  el('order').value);
@@ -774,6 +1020,12 @@ toast('Đã lưu, áp dụng ngay');
 }
 }).catch(function () { toast('Lưu thất bại'); });
 }
+function preview() {
+fetch('/api/preview?fx=' + el('fx').value, { method: 'POST' })
+.then(function (r) { return r.json(); })
+.then(function (res) { toast('Xem thử ' + res.fx + ' — ' + res.seconds + 's'); })
+.catch(function () { toast('Không xem thử được'); });
+}
 function factoryReset() {
 if (!confirm('Xoá toàn bộ cấu hình, kể cả WiFi. Thiết bị sẽ quay về chế độ AP. Tiếp tục?')) return;
 fetch('/api/reset', { method: 'POST' }).then(function () {
@@ -785,6 +1037,8 @@ buildStates();
 loadConfig();
 loadStatus();
 el('bright').addEventListener('input', function () { el('bv').textContent = this.value; });
+el('fxb').addEventListener('input', function () { el('fxbv').textContent = this.value; });
+el('fxs').addEventListener('input', function () { el('fxsv').textContent = this.value; });
 setInterval(loadStatus, 3000);
 </script>
 </body></html>
